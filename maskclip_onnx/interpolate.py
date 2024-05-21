@@ -39,7 +39,7 @@ def interpolate_positional_embedding(
     patch_pos_embed_interp = torch.nn.functional.interpolate(
         patch_pos_embed.reshape(1, patch_per_ax, patch_per_ax, dim).permute(0, 3, 1, 2),
         # (1, dim, patch_per_ax, patch_per_ax)
-        scale_factor=(w0 / patch_per_ax, h0 / patch_per_ax),
+        scale_factor=(float(w0 / patch_per_ax), float(h0 / patch_per_ax)),
         mode="bicubic",
         align_corners=False,
         recompute_scale_factor=False,
