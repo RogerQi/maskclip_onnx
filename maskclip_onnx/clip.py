@@ -92,7 +92,7 @@ def available_models() -> List[str]:
     return list(_MODELS.keys())
 
 
-TORCH_HUB_ROOT = os.path.expandvars(os.getenv("$TORCH_HUB_ROOT", "$HOME/.torch_hub"))
+TORCH_HUB_ROOT = os.getenv("TORCH_HUB_ROOT", os.path.expandvars("$HOME/.torch_hub"))
 
 
 def load(
