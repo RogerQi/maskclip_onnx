@@ -268,7 +268,12 @@ class VisionTransformer(nn.Module):
         x = self.conv1(x)  # shape = [*, width, grid, grid]
         x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
         x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
-        x = torch.cat([self.class_embedding.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device), x], dim=1)  # shape = [*, grid ** 2 + 1, width]
+
+        # Roger(12-4-2024): original implementation
+        # x = torch.cat([self.class_embedding.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device), x], dim=1)  # shape = [*, grid ** 2 + 1, width]
+        # Roger(12-4-2024): modified implementation for onnx exporting in torch>=2.0.0
+        x = torch.cat([self.class_embedding.view(1, 1, -1).repeat(x.shape[0], 1, 1), x], dim=1)  # shape = [*, grid ** 2 + 1, width]
+
         x = x + interpolate_positional_embedding(self.positional_embedding, x, patch_size=self.patch_size, w=w, h=h)
         x = self.ln_pre(x)
 
@@ -466,7 +471,7 @@ def convert_weights(model: nn.Module):
     model.apply(_convert_weights_to_fp16)
 
 
-def build_model(state_dict: dict):
+def build_model(state_dict: dict, convert_to_fp16: bool):
     vit = "visual.proj" in state_dict
 
     if vit:
@@ -501,6 +506,7 @@ def build_model(state_dict: dict):
         if key in state_dict:
             del state_dict[key]
 
-    convert_weights(model)
+    if convert_to_fp16:
+        convert_weights(model)
     model.load_state_dict(state_dict)
     return model.eval()

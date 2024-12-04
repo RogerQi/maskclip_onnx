@@ -99,7 +99,8 @@ def load(
         name: str,
         device: Union[str, torch.device] = "cuda" if torch.cuda.is_available() else "cpu",
         jit: bool = False,
-        download_root: str = None
+        download_root: str = None,
+        convert_to_fp16: bool = False,
 ):
     """Load a CLIP model
 
@@ -145,7 +146,7 @@ def load(
             state_dict = torch.load(opened_file, map_location="cpu")
 
     if not jit:
-        model = build_model(state_dict or model.state_dict()).to(device)
+        model = build_model(state_dict or model.state_dict(), convert_to_fp16).to(device)
         if str(device) == "cpu":
             model.float()
         return model, _transform(model.visual.input_resolution)
