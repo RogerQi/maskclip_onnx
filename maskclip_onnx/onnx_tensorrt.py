@@ -11,6 +11,8 @@ import os
 import tensorrt as trt
 from onnx.backend.base import Backend, BackendRep, Device, DeviceType, namedtupledict
 import onnx
+import torch
+import ctypes
 from onnx import helper as onnx_helper
 import numpy as np
 import six
@@ -19,11 +21,37 @@ import pycuda.driver
 import pycuda.gpuarray
 import pycuda.autoinit
 
+import numba
+from numba import cuda
+
 # HACK Should look for a better way/place to do this
 from ctypes import cdll, c_char_p
 libcudart = cdll.LoadLibrary('libcudart.so')
 libcudart.cudaGetErrorString.restype = c_char_p
 
+TORCH_NP_DTYPE_MAP = {
+    # signed integers
+    torch.int8: np.int8,
+    torch.int16: np.int16,
+    torch.short: np.int16,
+    torch.int32: np.int32,
+    torch.int: np.int32,
+    torch.int64: np.int64,
+    torch.long: np.int64,
+
+    # unsinged inters
+    torch.uint8: np.uint8,
+
+    # floating point
+    torch.float: np.float32,
+    torch.float32: np.float32,
+    torch.float16: np.float16,
+    torch.half: np.float16,
+    torch.float64: np.float64,
+    torch.double: np.float64
+}
+
+NP_TORCH_DTYPE_MAP = {v: k for k, v in TORCH_NP_DTYPE_MAP.items()}
 
 def cudaSetDevice(device_idx):
     """Set the device to the given device index."""
@@ -75,20 +103,33 @@ class Binding(object):
         self.shape = tuple(shape)
         self._host_buf   = None
         self._device_buf = None
+
     @property
     def host_buffer(self):
         if self._host_buf is None:
             self._host_buf = pycuda.driver.pagelocked_empty(self.shape, self.dtype)
         return self._host_buf
+    
     @property
     def device_buffer(self):
         if self._device_buf is None:
             self._device_buf = pycuda.gpuarray.empty(self.shape, self.dtype)
         return self._device_buf
-    def get_async(self, stream):
+    
+    def get_async(self, stream, input_output_mode):
         src = self.device_buffer
-        dst = self.host_buffer
-        src.get_async(stream, dst)
+
+        if input_output_mode == 'numpy':
+            dst = self.host_buffer
+            src.get_async(stream, dst)
+        elif input_output_mode == 'torch_cuda':
+            # Failed attempts: ctypes pointer conversion. Direct as_tensor. dtod memcpy (issue seems to be pytorch memory).
+            output_arr = cuda.as_cuda_array(src)  # uses __cuda_array_interface__
+            output_arr = torch.as_tensor(output_arr, device='cuda')
+            return output_arr
+        else:
+            raise ValueError("Invalid input_output_mode: %s" % input_output_mode)
+
         return dst
 
 def squeeze_hw(x):
@@ -98,31 +139,43 @@ def squeeze_hw(x):
         x = x.reshape(x.shape[:-1])
     return x
 
-def check_input_validity(input_idx, input_array, input_binding):
+def check_input_validity(input_idx, input_array, input_binding, input_output_mode):
     # Check shape
     trt_shape = tuple(input_binding.shape)
     onnx_shape    = tuple(input_array.shape)
+    gpu_ptr_copy_flag = False
 
     if onnx_shape != trt_shape:
         if not (trt_shape == (1,) and onnx_shape == ()) :
             raise ValueError("Wrong shape for input %i. Expected %s, got %s." %
                             (input_idx, trt_shape, onnx_shape))
-
-    # Check dtype
-    if input_array.dtype != input_binding.dtype:
-        #TRT does not support INT64, need to convert to INT32
-        if input_array.dtype == np.int64 and input_binding.dtype == np.int32:
-            casted_input_array = np.array(input_array, copy=True, dtype=np.int32)
-            if np.equal(input_array, casted_input_array).all():
-                input_array = casted_input_array
-            else:
-                raise TypeError("Wrong dtype for input %i. Expected %s, got %s. Cannot safely cast." %
-                            (input_idx, input_binding.dtype, input_array.dtype))
+    
+    if input_output_mode == 'torch_cuda':
+        assert input_array.is_cuda
+        if TORCH_NP_DTYPE_MAP[input_array.dtype] == input_binding.dtype:
+            # subsequent logic performs ptr-to-ptr copy
+            gpu_ptr_copy_flag = True
         else:
             raise TypeError("Wrong dtype for input %i. Expected %s, got %s." %
                             (input_idx, input_binding.dtype, input_array.dtype))
-    return input_array
+    elif input_output_mode == 'numpy':
+        # Check dtype
+        if input_array.dtype != input_binding.dtype:
+            #TRT does not support INT64, need to convert to INT32
+            if input_array.dtype == np.int64 and input_binding.dtype == np.int32:
+                casted_input_array = np.array(input_array, copy=True, dtype=np.int32)
+                if np.equal(input_array, casted_input_array).all():
+                    input_array = casted_input_array
+                else:
+                    raise TypeError("Wrong dtype for input %i. Expected %s, got %s. Cannot safely cast." %
+                                (input_idx, input_binding.dtype, input_array.dtype))
+            else:
+                raise TypeError("Wrong dtype for input %i. Expected %s, got %s." %
+                                (input_idx, input_binding.dtype, input_array.dtype))
+    else:
+        raise ValueError("Invalid input_output_mode: %s" % input_output_mode)
 
+    return input_array, gpu_ptr_copy_flag
 
 class Engine(object):
     def __init__(self, trt_engine):
@@ -144,7 +197,8 @@ class Engine(object):
         if self.engine is not None:
             del self.engine
 
-    def run(self, inputs):
+    def run(self, inputs, input_output_mode):
+        assert input_output_mode in ['torch_cuda', 'numpy']
         # len(inputs) > len(self.inputs) with Shape operator, input is never used
         # len(inputs) == len(self.inputs) for other operators
 
@@ -155,9 +209,14 @@ class Engine(object):
             inputs = [inputs[b.name] for b in self.inputs]
 
         for i, (input_array, input_binding) in enumerate(zip(inputs, self.inputs)):
-            input_array = check_input_validity(i, input_array, input_binding)
+            input_array, gpu_ptr_copy_flag = check_input_validity(i, input_array, input_binding, input_output_mode)
             input_binding_array = input_binding.device_buffer
-            input_binding_array.set_async(input_array, self.stream)
+            if gpu_ptr_copy_flag:
+                pycuda.driver.memcpy_dtod_async(input_binding_array.ptr, input_array.data_ptr(), input_binding_array.nbytes, self.stream)
+                # this raises illegal memory access error in internal TRT engine.
+                # input_binding_array.gpudata = input_array.data_ptr()
+            else:
+                input_binding_array.set_async(input_array, self.stream)
 
         num_io = self.engine.num_io_tensors
         for i in range(num_io):
@@ -169,8 +228,7 @@ class Engine(object):
 
         self.context.execute_async_v3(self.stream.handle)
 
-        results = [output.get_async(self.stream)
-                   for output in self.outputs]
+        results = [output.get_async(self.stream, input_output_mode) for output in self.outputs]
         self.stream.synchronize()
         return results
 
@@ -358,16 +416,17 @@ class TensorRTBackendRep(BackendRep):
             serialized_engine)
         return trt_engine
 
-    def run(self, inputs, **kwargs):
+    def run(self, inputs, input_output_mode='numpy', **kwargs):
         """Execute the prepared engine and return the outputs as a named tuple.
 
         Args:
             inputs -- Input tensor(s) as a Numpy array or list of Numpy arrays.
+            input_output_mode (str, optional): input_output_mode (str, optional): 'numpy' or 'torch_cuda'. Defaults to 'numpy'.
         """
-        if isinstance(inputs, np.ndarray):
+        if isinstance(inputs, np.ndarray) or isinstance(inputs, torch.Tensor):
             inputs = [inputs]
 
-        outputs = self.engine.run(inputs)
+        outputs = self.engine.run(inputs, input_output_mode)
         output_names = [output.name for output in self.engine.outputs]
 
         for i, (name, array) in enumerate(zip(output_names, outputs)):
