@@ -100,7 +100,7 @@ def load(
         device: Union[str, torch.device] = "cuda" if torch.cuda.is_available() else "cpu",
         jit: bool = False,
         download_root: str = None,
-        convert_to_fp16: bool = False,
+        convert_to_fp16: bool = True,
 ):
     """Load a CLIP model
 

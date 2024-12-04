@@ -462,7 +462,7 @@ def convert_weights(model: nn.Module):
                 if tensor is not None:
                     tensor.data = tensor.data.half()
 
-        for name in ["text_projection", "proj"]:
+        for name in ["text_projection", "proj", "class_embedding"]:
             if hasattr(l, name):
                 attr = getattr(l, name)
                 if attr is not None:
