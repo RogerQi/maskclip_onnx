@@ -1,14 +1,11 @@
-# maskclip_onnx
+# MaskCLIP ONNX
 
-To install, go to the directory where this is cloned and run
+Modified version of [CLIP](https://github.com/openai/CLIP) with several useful features
 
-```bash
-pip install -e .
-```
+- support for dense patch-level feature extraction (based on [MaskCLIP](https://arxiv.org/abs/2112.01071) parametrization) and interpolation of the positional encoding.
+- ONNX export
+- TensorRT acceleration
 
-For installing accelerated version, run
+<a href="assets/method_overview.png"><img height="300" src="assets/timing_plot.png"> </a>
 
-```bash
-pip install tensorrt-cu11  # change cu11 to your cuda version
-
-```
+To install, please refer to [INSTALL.md](docs/INSTALL.md).
