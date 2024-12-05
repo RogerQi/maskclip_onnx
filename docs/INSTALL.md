@@ -27,7 +27,9 @@ conda create -y -n maskclip_onnx python=3.8 && conda activate maskclip_onnx
 # This is the testing command I used, but any latest pytorch should be fine
 pip install torch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1 --index-url https://download.pytorch.org/whl/cu118
 conda install -c "nvidia/label/cuda-11.8.0" cuda-toolkit
-pip install git+https://github.com/RogerQi/maskclip_onnx
+
+git clone --recursive https://github.com/RogerQi/maskclip_onnx
+pip install -e .
 ```
 
 ### Install TensorRT dependencies
@@ -36,8 +38,7 @@ If you want to accelerate model inference speed with tensorRT, you need these de
 
 ```bash
 pip install tensorrt-cu11  # change cu11 to your cuda version used above
-pip install pycuda
-pip install onnx onnxruntime
+pip install pycuda onnx onnxruntime numba
 ```
 
 ### FAQ
